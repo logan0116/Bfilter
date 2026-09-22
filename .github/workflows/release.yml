@@ -22,8 +22,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth: 0 是必须的 —— 下面要读 annotated tag 的说明文字，
+      # 而默认的浅克隆不拉取 tag。
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -67,16 +72,49 @@ jobs:
       - name: Build signed release APK
         run: ./gradlew :app:assembleRelease --no-daemon
 
+      # 用带版本号的文件名，别叫 app-release.apk —— 下载下来一堆同名文件分不清
+      - name: Rename APK
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk "bfilter-${GITHUB_REF_NAME}.apk"
+          ls -la bfilter-*.apk
+
       - name: Verify APK signature
         run: |
-          APK=app/build/outputs/apk/release/app-release.apk
-          ls -la "$APK"
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          "$SDK/build-tools/35.0.0/apksigner" verify --print-certs "$APK" | head -6
+          "$SDK/build-tools/35.0.0/apksigner" verify --print-certs "bfilter-${GITHUB_REF_NAME}.apk" | head -6
+
+      # Release 正文用 tag 上的说明文字（git tag -a 时写的）。
+      # 默认的 generate_release_notes 对**首个** tag 只会输出一行 Full Changelog —— 门面太差。
+      - name: Compose release notes
+        id: notes
+        env:
+          TAG_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MSG=$(git tag -l --format='%(contents)' "$TAG")
+          if [ -z "$MSG" ]; then
+            MSG="$(git log -1 --pretty=%B)"
+          fi
+          {
+            echo "body<<__NOTES_EOF__"
+            printf '%s\n\n' "$MSG"
+            echo "### 安装"
+            echo
+            echo "下载下面的 \`bfilter-${TAG}.apk\` 直接安装。已装旧版的会**正常覆盖升级**（签名一致，不会清数据）。"
+            echo
+            echo "首次使用：到「UP 主」页添加你想看的人 —— 主页只会出现他们的更新，没有推荐流。"
+            echo
+            echo "### 校验下载完整性（可选）"
+            echo
+            echo '```'
+            echo "sha256sum bfilter-${TAG}.apk"
+            echo '```'
+            echo "__NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/app-release.apk
-          generate_release_notes: true
+          files: bfilter-*.apk
+          body: ${{ steps.notes.outputs.body }}
           draft: false
