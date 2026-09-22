@@ -1,0 +1,34 @@
+package com.mozinodey.bfilter
+
+import android.app.Application
+import com.mozinodey.bfilter.data.FeedCacheStore
+import com.mozinodey.bfilter.data.LoginStore
+import com.mozinodey.bfilter.data.VideoRepository
+import com.mozinodey.bfilter.data.WhitelistStore
+import com.mozinodey.bfilter.data.remote.BiliHttp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+/**
+ * 极简依赖持有者。工程规模小，不引入 DI 框架 —— ViewModel 直接从 Application 取。
+ */
+class BfilterApp : Application() {
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    val whitelistStore: WhitelistStore by lazy { WhitelistStore(this) }
+    val feedCacheStore: FeedCacheStore by lazy { FeedCacheStore(this) }
+    val loginStore: LoginStore by lazy { LoginStore(this) }
+    val repository: VideoRepository by lazy { VideoRepository(feedCacheStore) }
+
+    override fun onCreate() {
+        super.onCreate()
+        // 把持久化的登录凭证持续注入到网络层：进程启动时立刻生效，
+        // 之后登录/退出的变化也自动跟随。
+        appScope.launch {
+            loginStore.cookie.collect { cookie -> BiliHttp.setLoginCookie(cookie) }
+        }
+    }
+}
