@@ -26,6 +26,11 @@ import xml.etree.ElementTree as ET
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADB_WRAP = os.path.join(REPO, "tools", "adb-wrap.sh")
+
+# 应用包名。硬编码在这里是为了让 add-uids 能重启到干净状态；
+# 换了包名或装了多个变体时用环境变量覆盖：BFILTER_PACKAGE=xxx python3 tools/ui_probe.py ...
+APP_PACKAGE = os.environ.get("BFILTER_PACKAGE", "io.github.logan0116.bfilter")
+
 BOUNDS_RE = re.compile(r"\[(\d+),(\d+)]\[(\d+),(\d+)]")
 
 
@@ -157,9 +162,9 @@ def main(argv):
         # 从确定状态开始：重启到前端页面。
         # （不要用 KEYCODE_BACK 去"关对话框"——对话框早就关了的话，BACK 会直接退出 app。）
         adb("shell", "input keyevent KEYCODE_WAKEUP")
-        adb("shell", "am force-stop com.mozinodey.bfilter")
+        adb("shell", f"am force-stop {APP_PACKAGE}")
         time.sleep(0.6)
-        adb("shell", "am start -n com.mozinodey.bfilter/.MainActivity")
+        adb("shell", f"am start -n {APP_PACKAGE}/.MainActivity")
         time.sleep(4.0)
 
         root = dump_xml()

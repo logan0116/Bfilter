@@ -21,11 +21,11 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKeystore = keystoreProperties.getProperty("storeFile") != null
 
 android {
-    namespace = "com.mozinodey.bfilter"
+    namespace = "io.github.logan0116.bfilter"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.mozinodey.bfilter"
+        applicationId = "io.github.logan0116.bfilter"
         minSdk = 24
         targetSdk = 35
         versionCode = 1

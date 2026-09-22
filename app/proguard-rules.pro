@@ -7,11 +7,11 @@
 -keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.mozinodey.bfilter.**$$serializer { *; }
--keepclassmembers class com.mozinodey.bfilter.** {
+-keep,includedescriptorclasses class io.github.logan0116.bfilter.**$$serializer { *; }
+-keepclassmembers class io.github.logan0116.bfilter.** {
     *** Companion;
 }
--keepclasseswithmembers class com.mozinodey.bfilter.** {
+-keepclasseswithmembers class io.github.logan0116.bfilter.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
 
