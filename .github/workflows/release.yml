@@ -83,21 +83,32 @@ jobs:
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           "$SDK/build-tools/35.0.0/apksigner" verify --print-certs "bfilter-${GITHUB_REF_NAME}.apk" | head -6
 
-      # Release 正文用 tag 上的说明文字（git tag -a 时写的）。
-      # 默认的 generate_release_notes 对**首个** tag 只会输出一行 Full Changelog —— 门面太差。
+      # Release 正文优先读 `.github/release-notes/<tag>.md`。
+      #
+      # 为什么不直接用 tag 的说明文字：本地 `git tag -l --format='%(contents)'` 能拿到，
+      # 但在 checkout 出来的 CI 工作区里拿到的是空 —— 而空值会 fallback 到 commit message，
+      # 结果 Release 正文写成了一条 commit log（v0.1 第一次发布就是这么翻车的）。
+      # 放进仓库文件则确定、可 review、也不受 git fetch 行为影响。
       - name: Compose release notes
         id: notes
-        env:
-          TAG_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          MSG=$(git tag -l --format='%(contents)' "$TAG")
-          if [ -z "$MSG" ]; then
-            MSG="$(git log -1 --pretty=%B)"
+          NOTES_FILE=".github/release-notes/${TAG}.md"
+
+          if [ -f "$NOTES_FILE" ]; then
+            echo "::notice::使用 $NOTES_FILE 作为 Release 正文"
+            BODY=$(cat "$NOTES_FILE")
+          else
+            echo "::warning::缺少 $NOTES_FILE，退回用 tag 说明文字"
+            BODY=$(git tag -l --format='%(contents)' "$TAG" 2>/dev/null || true)
+            if [ -z "$BODY" ]; then
+              BODY=$(git log -1 --pretty=%B)
+            fi
           fi
+
           {
-            echo "body<<__NOTES_EOF__"
-            printf '%s\n\n' "$MSG"
+            echo "body<<__BFILTER_NOTES_EOF__"
+            printf '%s\n\n' "$BODY"
             echo "### 安装"
             echo
             echo "下载下面的 \`bfilter-${TAG}.apk\` 直接安装。已装旧版的会**正常覆盖升级**（签名一致，不会清数据）。"
@@ -109,7 +120,7 @@ jobs:
             echo '```'
             echo "sha256sum bfilter-${TAG}.apk"
             echo '```'
-            echo "__NOTES_EOF__"
+            echo "__BFILTER_NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
