@@ -66,6 +66,42 @@ keyPassword=你的口令
 
 > 不想自己编译：GitHub Actions 每次 push 会自动出 debug 包，在 **Actions** 页面下 artifact 即可。
 
+## 发布新版本
+
+正式签名的 release 包由 GitHub Actions 在**打 tag 时**自动构建并发布 ——
+签名材料放在仓库 Secrets 里，不进代码库。
+
+**首次配置（只需一次）：**
+
+1. 把 keystore 导出成单行 base64：
+
+   ```bash
+   base64 -w0 keystore/release.jks
+   ```
+
+2. 到仓库 **Settings → Secrets and variables → Actions** 添加四个 secret：
+
+   | Secret | 值 |
+   | --- | --- |
+   | `KEYSTORE_BASE64` | 上一步输出的整行 base64 |
+   | `KEYSTORE_PASSWORD` | `keystore.properties` 里的 `storePassword` |
+   | `KEY_ALIAS` | `keystore.properties` 里的 `keyAlias` |
+   | `KEY_PASSWORD` | `keystore.properties` 里的 `keyPassword` |
+
+3. 确认 `app/build.gradle.kts` 里的 `versionCode` / `versionName` 已递增，然后打 tag：
+
+   ```bash
+   git tag v0.1
+   git push origin v0.1
+   ```
+
+CI 会自动跑 lint + 单测 → 构建签名包 → 用 `apksigner` 校验签名 → 创建 Release 并附上 APK。
+**签名一致**，所以已装旧版的手机会正常收到升级。
+
+> 安全说明：Secrets 在传输和存储时都是加密的，Pull Request 触发的 workflow 拿不到它们
+> （fork PR 不授予 secrets）。但 keystore 一旦泄露就等于别人能签你的包 —— 请确保仓库
+> 只有你自己有写权限，并且别把 keystore 直接提交进代码。
+
 ## 技术笔记：这个仓库最值钱的部分
 
 下面每条都是**实测结论**，不是照文档抄的。做同类项目的话可以直接省掉这些弯路。

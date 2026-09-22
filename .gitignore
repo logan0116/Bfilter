@@ -17,6 +17,9 @@ probe/
 keystore.properties
 keystore/*.jks
 
+# 签名材料导出（含私钥，仅用于配置 GitHub Secrets）
+.signing-secrets.txt
+
 dist/
 shots/
 
