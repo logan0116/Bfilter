@@ -1,6 +1,12 @@
 package io.github.logan0116.bfilter.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.view.GestureDetector
+import android.view.MotionEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -47,9 +53,11 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import io.github.logan0116.bfilter.BfilterApp
 import io.github.logan0116.bfilter.data.remote.BiliApi
 import io.github.logan0116.bfilter.data.remote.BiliHttp
 import io.github.logan0116.bfilter.domain.VideoItem
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -86,11 +94,35 @@ fun PlayerScreen(
     // 于是视频都播起来了那个环还在转 —— 这是它一直转的原因。
     var isBuffering by remember { mutableStateOf(true) }
 
+    // 倍速只做展示提示；真值以 player.playbackParameters 为准，避免闭包读到旧状态
+    var speedLabel by remember { mutableStateOf("") }
+
+    // 断点续播：要等播放器 READY 才能 seek，先把它记下来
+    var pendingSeekMs by remember { mutableStateOf(0L) }
+
     val context = LocalContext.current
+    val app = context.applicationContext as BfilterApp
+    val positionStore = app.playbackPositionStore
+
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
             .build()
             .apply { playWhenReady = true }
+    }
+
+    // 上次看到哪儿了
+    LaunchedEffect(video.bvid) {
+        pendingSeekMs = positionStore.positionOf(video.bvid)
+    }
+
+    // 每 5 秒落一次进度；退出时的最后一次在 onDispose 里补
+    LaunchedEffect(video.bvid) {
+        while (true) {
+            delay(5_000)
+            val pos = exoPlayer.currentPosition
+            val dur = exoPlayer.duration
+            if (pos > 0 && dur > 0) positionStore.save(video.bvid, pos, dur)
+        }
     }
 
     DisposableEffect(exoPlayer) {
@@ -104,6 +136,13 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 isBuffering = playbackState == Player.STATE_BUFFERING ||
                     playbackState == Player.STATE_IDLE
+
+                // 必须等 READY 再 seek：prepare 尚未完成时 seek 会被丢掉
+                if (playbackState == Player.STATE_READY && pendingSeekMs > 0L) {
+                    exoPlayer.seekTo(pendingSeekMs)
+                    status = "已跳到上次位置 ${formatDuration((pendingSeekMs / 1000).toInt())}"
+                    pendingSeekMs = 0L
+                }
             }
 
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -113,6 +152,13 @@ fun PlayerScreen(
         exoPlayer.addListener(listener)
         onDispose {
             exoPlayer.removeListener(listener)
+            // 退出时补记一次进度：可能距上次定期保存还不到 5 秒。
+            // 这里不能用 Composable 的作用域 —— 它马上就会被取消。
+            val pos = exoPlayer.currentPosition
+            val dur = exoPlayer.duration
+            if (pos > 0 && dur > 0) {
+                app.launchInBackground { positionStore.save(video.bvid, pos, dur) }
+            }
             exoPlayer.release()
         }
     }
@@ -167,6 +213,14 @@ fun PlayerScreen(
         }
     }
 
+    // 长按切换倍速：1× ↔ 2×。
+    // 用 player 上的真实值做判断，不用 speedLabel —— 那是个展示状态，闭包里会读到旧值。
+    val toggleSpeed: () -> Unit = {
+        val next = if (exoPlayer.playbackParameters.speed > 1f) 1f else 2f
+        exoPlayer.setPlaybackSpeed(next)
+        speedLabel = if (next > 1f) "${next.toInt()}×" else ""
+    }
+
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
@@ -180,7 +234,11 @@ fun PlayerScreen(
                 .background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
-            PlayerSurface(exoPlayer, Modifier.fillMaxSize())
+            VideoArea(
+                player = exoPlayer,
+                onToggleSpeed = toggleSpeed,
+                modifier = Modifier.fillMaxSize()
+            )
             IconButton(
                 onClick = onBack,
                 modifier = Modifier
@@ -225,15 +283,13 @@ fun PlayerScreen(
             )
         }
 
-        Box(
+        VideoArea(
+            player = exoPlayer,
+            onToggleSpeed = toggleSpeed,
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            PlayerSurface(exoPlayer, Modifier.fillMaxSize())
-        }
+        )
 
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -260,7 +316,10 @@ fun PlayerScreen(
                     }
 
                     else -> Text(
-                        text = if (quality.isBlank()) status else "$status · $quality",
+                        text = buildString {
+                            append(if (quality.isBlank()) status else "$status · $quality")
+                            if (speedLabel.isNotBlank()) append(" · $speedLabel")
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -300,17 +359,79 @@ fun PlayerScreen(
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
-private fun PlayerSurface(player: ExoPlayer, modifier: Modifier = Modifier) {
+private fun PlayerSurface(
+    player: ExoPlayer,
+    onToggleSpeed: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     AndroidView(
         factory = { context ->
+            // 双击暂停 / 长按倍速只能用 Android 原生的 GestureDetector 接。
+            // 试过在 Compose 层用 pointerInput 盖在上面 —— 完全不触发：
+            // AndroidView 是独立的 View 层级，触摸事件先被它吃掉，外层收不到。
+            val gestures = GestureDetector(
+                context,
+                object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onDoubleTap(e: MotionEvent): Boolean {
+                        player.playWhenReady = !player.playWhenReady
+                        return true
+                    }
+
+                    override fun onLongPress(e: MotionEvent) {
+                        onToggleSpeed()
+                    }
+                }
+            )
+
             PlayerView(context).apply {
                 useController = true
                 setShowNextButton(false)
                 setShowPreviousButton(false)
                 setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                // media3 默认把这个按钮藏起来，只有给了监听器它才会出现在控制条上。
+                // 它只负责"切方向"，横屏/竖屏的布局由 PlayerScreen 按 configuration 决定。
+                setFullscreenButtonClickListener { enterFullscreen ->
+                    context.findActivity()?.requestedOrientation = if (enterFullscreen) {
+                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    } else {
+                        ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    }
+                }
+
+                // 返回 false = 只旁听，不消费。让事件继续走 PlayerView.onTouchEvent，
+                // 否则控制条的显示/隐藏会被我们的手势吃掉。
+                setOnTouchListener { _, event ->
+                    gestures.onTouchEvent(event)
+                    false
+                }
             }
         },
         update = { view -> view.player = player },
         modifier = modifier
     )
+}
+
+/** 视频区。手势在 PlayerSurface 里用 GestureDetector 接，这一层只负责摆位置和底色。 */
+@Composable
+private fun VideoArea(
+    player: ExoPlayer,
+    onToggleSpeed: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.background(Color.Black),
+        contentAlignment = Alignment.Center
+    ) {
+        PlayerSurface(player, onToggleSpeed, Modifier.fillMaxSize())
+    }
+}
+
+/** 从任意 Context 向上找宿主 Activity —— 切屏幕方向得用它 */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
