@@ -166,6 +166,8 @@ https://account.bilibili.com/h5/account-h5/signin/scan-web?...&qrcode_key=...
 
 ## 六、复现命令
 
+> 以下命令都在**仓库根目录**执行（本文档位于 `docs/`，但命令里的路径都是相对仓库根的）。
+
 ```bash
 cd ~/PycharmProjects/Bfilter
 export GRADLE_USER_HOME=$PWD/.gradle-home
@@ -174,7 +176,7 @@ export GRADLE_USER_HOME=$PWD/.gradle-home
 tools/build.sh :app:lintRelease :app:testDebugUnitTest :app:assembleRelease
 
 # 装到手机
-tools/adb-wrap.sh install -r dist/bfilter-0.3-release.apk
+tools/adb-wrap.sh install -r app/build/outputs/apk/release/app-release.apk
 
 # 界面自动化（Compose 无 view id，只能走语义树）
 python3 tools/ui_probe.py dump                    # 看当前界面的可点元素
