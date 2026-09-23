@@ -3,6 +3,10 @@ package io.github.logan0116.bfilter.ui
 import android.app.Application
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +25,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -46,6 +52,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import io.github.logan0116.bfilter.BfilterApp
+import io.github.logan0116.bfilter.data.FeedSettings
 import io.github.logan0116.bfilter.data.remote.BiliApi
 import io.github.logan0116.bfilter.data.remote.BiliHttp
 import io.github.logan0116.bfilter.domain.AccountInfo
@@ -65,7 +72,8 @@ data class AccountUiState(
     val qrImage: ImageBitmap? = null,
     val qrState: QrState? = null,
     val statusText: String = "",
-    val error: String? = null
+    val error: String? = null,
+    val settings: FeedSettings = FeedSettings()
 )
 
 /** 扫码轮询间隔 */
@@ -80,6 +88,7 @@ private const val MAX_QR_ROUNDS = 3
 class AccountViewModel(app: Application) : AndroidViewModel(app) {
 
     private val loginStore = (app as BfilterApp).loginStore
+    private val settingsStore = (app as BfilterApp).settingsStore
 
     private val _state = MutableStateFlow(AccountUiState())
     val state: StateFlow<AccountUiState> = _state.asStateFlow()
@@ -90,6 +99,17 @@ class AccountViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             loginStore.account.collect { account -> _state.update { it.copy(account = account) } }
         }
+        viewModelScope.launch {
+            settingsStore.settings.collect { s -> _state.update { it.copy(settings = s) } }
+        }
+    }
+
+    fun setRecentDays(days: Int) {
+        viewModelScope.launch { settingsStore.setRecentDays(days) }
+    }
+
+    fun setMinDuration(seconds: Int) {
+        viewModelScope.launch { settingsStore.setMinDuration(seconds) }
     }
 
     fun startLogin() {
@@ -237,7 +257,12 @@ fun AccountScreen(
 ) {
     val state by viewModel.state.collectAsState()
 
-    Column(modifier = modifier.fillMaxSize()) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            // 加了观看偏好之后内容会超过一屏，得能滚
+            .verticalScroll(rememberScrollState())
+    ) {
         ScreenHeader(
             title = "账号",
             subtitle = if (state.account == null) "未登录（480P）" else "已登录"
@@ -267,6 +292,101 @@ fun AccountScreen(
             }
         } else {
             LoggedInPanel(account = state.account!!, onLogout = viewModel::logout)
+        }
+
+        // 观看偏好：跟登录状态无关，未登录也要能调
+        FeedPreferencePanel(
+            settings = state.settings,
+            onRecentDays = viewModel::setRecentDays,
+            onMinDuration = viewModel::setMinDuration
+        )
+    }
+}
+
+/**
+ * 观看偏好。
+ *
+ * 默认「近 3 天 + 不短于 1 分钟」是刻意的：白名单一多，时间线就会变成一条刷不到头的流，
+ * 那又回到了被信息流拖着走的老问题。默认筛短一点，这条流才有尽头。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FeedPreferencePanel(
+    settings: FeedSettings,
+    onRecentDays: (Int) -> Unit,
+    onMinDuration: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+        Spacer(modifier = Modifier.height(2.dp))
+
+        Text(
+            text = "观看偏好",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "默认只显示近 3 天、且不短于 1 分钟的内容 —— 让关注页刷得到头。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        PreferenceRow(
+            label = "只看最近",
+            choices = FeedSettings.RECENT_DAY_CHOICES,
+            selected = settings.recentDays,
+            choiceLabel = { if (it <= 0) "不限" else "$it 天" },
+            onSelect = onRecentDays
+        )
+
+        PreferenceRow(
+            label = "过滤短视频",
+            choices = FeedSettings.MIN_DURATION_CHOICES,
+            selected = settings.minDurationSec,
+            choiceLabel = { sec ->
+                when {
+                    sec <= 0 -> "不过滤"
+                    sec < 60 -> "低于 $sec 秒"
+                    else -> "低于 ${sec / 60} 分钟"
+                }
+            },
+            onSelect = onMinDuration
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PreferenceRow(
+    label: String,
+    choices: List<Int>,
+    selected: Int,
+    choiceLabel: (Int) -> String,
+    onSelect: (Int) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        // 用 FlowRow：选项在窄屏上会自动折行，不用自己算宽度
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            choices.forEach { value ->
+                FilterChip(
+                    selected = selected == value,
+                    onClick = { onSelect(value) },
+                    label = { Text(choiceLabel(value)) }
+                )
+            }
         }
     }
 }

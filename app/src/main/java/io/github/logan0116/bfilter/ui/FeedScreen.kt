@@ -41,6 +41,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import io.github.logan0116.bfilter.BfilterApp
+import io.github.logan0116.bfilter.data.FeedSettings
 import io.github.logan0116.bfilter.domain.VideoItem
 import io.github.logan0116.bfilter.domain.WhitelistUp
 import kotlinx.coroutines.Job
@@ -52,18 +53,27 @@ import kotlinx.coroutines.launch
 
 data class FeedUiState(
     val ups: List<WhitelistUp> = emptyList(),
+    /** 过滤后、真正展示的时间线 */
     val items: List<VideoItem> = emptyList(),
+    /** 拉回来的原始结果；改设置时拿它就地重算，不用重新联网 */
+    val allItems: List<VideoItem> = emptyList(),
+    val settings: FeedSettings = FeedSettings(),
     val failures: List<String> = emptyList(),
     val loading: Boolean = false,
     val loadedOnce: Boolean = false,
     /** 缓存写入时间（毫秒），0 表示当前内容不是来自缓存 */
     val cachedAt: Long = 0L
-)
+) {
+    /** 明明拉到了内容，却被筛没了 —— 得单独说一句，否则会被当成"拉取失败" */
+    val filteredOutEverything: Boolean
+        get() = items.isEmpty() && allItems.isNotEmpty()
+}
 
 class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = (app as BfilterApp).repository
     private val store = (app as BfilterApp).whitelistStore
+    private val settingsStore = (app as BfilterApp).settingsStore
 
     private val _state = MutableStateFlow(FeedUiState())
     val state: StateFlow<FeedUiState> = _state.asStateFlow()
@@ -78,7 +88,12 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
             repo.cachedFeed()?.let { cached ->
                 if (cached.items.isNotEmpty()) {
                     _state.update {
-                        it.copy(items = cached.items, cachedAt = cached.savedAt, loadedOnce = true)
+                        it.copy(
+                            allItems = cached.items,
+                            items = applyFilter(cached.items, it.settings),
+                            cachedAt = cached.savedAt,
+                            loadedOnce = true
+                        )
                     }
                 }
             }
@@ -91,7 +106,13 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
                 if (mids.isEmpty()) {
                     _state.update {
-                        it.copy(items = emptyList(), failures = emptyList(), cachedAt = 0L, loadedOnce = true)
+                        it.copy(
+                            allItems = emptyList(),
+                            items = emptyList(),
+                            failures = emptyList(),
+                            cachedAt = 0L,
+                            loadedOnce = true
+                        )
                     }
                     return@collect
                 }
@@ -99,13 +120,35 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
                 if (changed || !_state.value.loadedOnce) refresh()
             }
         }
+
+        // 设置一变就地重算，无需重新联网
+        viewModelScope.launch {
+            settingsStore.settings.collect { s ->
+                _state.update { it.copy(settings = s, items = applyFilter(it.allItems, s)) }
+            }
+        }
+    }
+
+    /** 按观看偏好筛选：只看最近 N 天 + 过滤短视频 */
+    private fun applyFilter(all: List<VideoItem>, settings: FeedSettings): List<VideoItem> {
+        val cutoff = if (settings.recentDays > 0) {
+            System.currentTimeMillis() / 1000 - settings.recentDays * 86_400L
+        } else {
+            0L
+        }
+        return all.filter { item ->
+            (cutoff == 0L || item.pubDateSec >= cutoff) &&
+                (settings.minDurationSec <= 0 || item.durationSec >= settings.minDurationSec)
+        }
     }
 
     fun refresh() {
         val ups = _state.value.ups
         refreshJob?.cancel()
         if (ups.isEmpty()) {
-            _state.update { it.copy(items = emptyList(), failures = emptyList(), loading = false, loadedOnce = true) }
+            _state.update {
+                it.copy(allItems = emptyList(), items = emptyList(), failures = emptyList(), loading = false, loadedOnce = true)
+            }
             return
         }
         refreshJob = viewModelScope.launch {
@@ -115,7 +158,8 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
                 .onSuccess { feed ->
                     _state.update {
                         it.copy(
-                            items = feed.items,
+                            allItems = feed.items,
+                            items = applyFilter(feed.items, it.settings),
                             failures = feed.failures,
                             loading = false,
                             loadedOnce = true,
@@ -136,16 +180,26 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
-/** 头部副标题：几个 UP 主 + 这批内容的来路（缓存还是刚拉的） */
+/** 头部副标题：几个 UP 主 + 内容来路 + 当前筛选条件 */
 private fun feedSubtitle(state: FeedUiState): String? {
     if (state.ups.isEmpty()) return null
-    val base = "${state.ups.size} 个 UP 主"
-    val freshness = when {
-        state.loading -> "更新中…"
-        state.cachedAt > 0 -> "更新于 ${formatRelativeTime(state.cachedAt / 1000)}"
-        else -> null
+
+    val parts = mutableListOf("${state.ups.size} 个 UP 主")
+    when {
+        state.loading -> parts += "更新中…"
+        state.cachedAt > 0 -> parts += "更新于 ${formatRelativeTime(state.cachedAt / 1000)}"
     }
-    return if (freshness == null) base else "$base · $freshness"
+
+    if (!state.settings.filtersNothing) {
+        val label = buildList {
+            if (state.settings.recentDays > 0) add("近 ${state.settings.recentDays} 天")
+            val mins = state.settings.minDurationSec
+            if (mins > 0) add(if (mins < 60) "≥${mins}秒" else "≥${mins / 60}分")
+        }.joinToString("/")
+        if (label.isNotBlank()) parts += label
+    }
+
+    return parts.joinToString(" · ")
 }
 
 /**
@@ -185,7 +239,14 @@ fun FeedScreen(
                 contentAlignment = Alignment.Center
             ) { CircularProgressIndicator() }
 
-            state.loadedOnce && state.items.isEmpty() -> EmptyHint("白名单里的 UP 主最近没有投稿")
+            state.loadedOnce && state.items.isEmpty() -> EmptyHint(
+                // 「筛没了」和「确实没更新」必须分开说，否则用户会以为拉取坏了
+                if (state.filteredOutEverything) {
+                    "当前筛选条件下没有内容\n（已筛掉 ${state.allItems.size} 条，可在「账号」页调整）"
+                } else {
+                    "白名单里的 UP 主最近没有投稿"
+                }
+            )
 
             else -> LazyColumn(
                 modifier = Modifier.fillMaxSize(),

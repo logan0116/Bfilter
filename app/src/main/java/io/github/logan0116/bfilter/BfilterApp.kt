@@ -4,6 +4,7 @@ import android.app.Application
 import io.github.logan0116.bfilter.data.FeedCacheStore
 import io.github.logan0116.bfilter.data.LoginStore
 import io.github.logan0116.bfilter.data.PlaybackPositionStore
+import io.github.logan0116.bfilter.data.SettingsStore
 import io.github.logan0116.bfilter.data.VideoRepository
 import io.github.logan0116.bfilter.data.WhitelistStore
 import io.github.logan0116.bfilter.data.remote.BiliHttp
@@ -23,6 +24,7 @@ class BfilterApp : Application() {
     val feedCacheStore: FeedCacheStore by lazy { FeedCacheStore(this) }
     val loginStore: LoginStore by lazy { LoginStore(this) }
     val playbackPositionStore: PlaybackPositionStore by lazy { PlaybackPositionStore(this) }
+    val settingsStore: SettingsStore by lazy { SettingsStore(this) }
     val repository: VideoRepository by lazy { VideoRepository(feedCacheStore) }
 
     /**
