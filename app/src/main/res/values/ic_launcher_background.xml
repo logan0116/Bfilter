@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">SeeLess</string>
+    <color name="ic_launcher_background">#F2EFEE</color>
 </resources>

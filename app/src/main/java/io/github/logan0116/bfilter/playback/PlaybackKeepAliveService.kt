@@ -66,7 +66,7 @@ class PlaybackKeepAliveService : Service() {
 
     private fun buildNotification(title: String) =
         NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title.ifBlank { "正在播放" })
             .setContentText("息屏后继续播放")
             .setContentIntent(
