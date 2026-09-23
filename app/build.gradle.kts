@@ -28,8 +28,8 @@ android {
         applicationId = "io.github.logan0116.bfilter"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
     }
 
     signingConfigs {
