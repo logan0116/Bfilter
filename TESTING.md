@@ -82,7 +82,7 @@ https://account.bilibili.com/h5/account-h5/signin/scan-web?...&qrcode_key=...
 
 即「任何扫码器都能识别」，而不是"看起来像个二维码"。
 
-## 三、发现并修复的 6 处缺陷
+## 三、发现并修复的 8 处缺陷
 
 | # | 缺陷 | 实测表现 | 修复 |
 | --- | --- | --- | --- |
@@ -94,6 +94,21 @@ https://account.bilibili.com/h5/account-h5/signin/scan-web?...&qrcode_key=...
 | 6 | 息屏后网络被系统与 ROM 掐断（**v0.3**） | 播放中静置约 1 分钟即报 `ERROR_CODE_IO_NETWORK_CONNECTION_FAILED`。关键判据：**进程还活着、还在发请求，只是连接建不起来** —— 若是进程被冻结/杀死，表现会是直接没声音而不是报网络错误 | ① `ExoPlayer.setWakeMode(WAKE_MODE_NETWORK)` 让播放期间持有 WifiLock + PARTIAL_WAKE_LOCK；② 播放期间起 `foregroundServiceType="mediaPlayback"` 的前台服务，进程不再掉成 cached；③ 单段加载重试 3→12 次，网络类错误按 1s→30s 指数退避自动 `prepare()` 重连（`prepare()` 保留播放位置，不会从头开始） |
 
 修复后逐条复测，均已在真机确认（第 8、9、13、21、22、23 项）。
+
+### v0.4 发布后用户报的两处（修于 v0.5）
+
+| # | 缺陷 | 实测表现 | 修复 |
+| --- | --- | --- | --- |
+| 7 | **全屏状态下返回直接退出播放** | 横屏看视频时右划/返回，本该先退出全屏，实际直接退出了播放页 | `BackHandler` 分两级：只有**我们自己点过全屏按钮**（`requestedOrientation == SENSOR_LANDSCAPE`）才先退回 `UNSPECIFIED`，否则正常退出播放。⚠️ 判据**不能**用 `configuration.orientation` —— 手机物理横着放时它同样返回横屏，那样返回键会永远停在「退出全屏」这一步，用户反而出不去播放页（这个边界问题是修复过程中自己引入、又被测试抓出来的） |
+| 8 | **播放中屏幕会自动暗屏 / 息屏** | 正在看视频，系统超时后照样暗屏息屏 | 在 `onIsPlayingChanged` 里设 `rootView.keepScreenOn = playing`，并在 `onDispose` 复位。`keepScreenOn` 只挡**系统超时息屏**，不影响用户按电源键主动关屏 —— 正是要的语义；暂停时放开，免得停在播放页发呆也一直亮着 |
+
+第 8 条的验证办法：把 `screen_off_timeout` 临时改成 15 秒（默认 60 秒），播放中静置 25 秒后查
+`dumpsys power` —— 修复前会变成 `Dozing`，修复后仍是 `Awake`。测完注意把系统设置改回去。
+
+第 7 条的验证有个坑：**不能用 `settings put system user_rotation 1` 来模拟全屏** ——
+那只是把系统转横，App 的 `requestedOrientation` 仍是 `UNSPECIFIED`，判据不会命中，会得出
+「修复没生效」的错误结论。正确做法是**先锁死竖屏**（`accelerometer_rotation 0` + `user_rotation 0`），
+再点 App 的全屏按钮：如果屏幕变横，才说明是 App 主动设的全屏状态。
 
 ## 四、未覆盖项与遗留风险
 

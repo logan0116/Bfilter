@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -130,7 +131,24 @@ fun PlayerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BackHandler { onBack() }
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    // 返回分两级：全屏时先退回竖屏，再返回一次才离开播放页。
+    // 之前这里是无条件 onBack()，于是横屏下右划直接退出了播放 ——
+    // 与用户在「全屏里退出全屏」的预期不符。
+    BackHandler {
+        val activity = context.findActivity()
+        // 判「是不是全屏」不能看 configuration.orientation：手机物理横着放时它同样是横屏，
+        // 那样返回键会永远停在「退出全屏」这一步，用户反而出不去播放页。
+        // 只有我们自己点过全屏按钮、设过 SENSOR_LANDSCAPE 才算全屏状态。
+        if (activity?.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE) {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } else {
+            onBack()
+        }
+    }
 
     var status by remember { mutableStateOf("正在获取播放地址…") }
     var isError by remember { mutableStateOf(false) }
@@ -146,7 +164,6 @@ fun PlayerScreen(
     // 断点续播：要等播放器 READY 才能 seek，先把它记下来
     var pendingSeekMs by remember { mutableStateOf(0L) }
 
-    val context = LocalContext.current
     val app = context.applicationContext as BfilterApp
     val positionStore = app.playbackPositionStore
 
@@ -187,6 +204,10 @@ fun PlayerScreen(
             if (pos > 0 && dur > 0) positionStore.save(video.bvid, pos, dur)
         }
     }
+
+    // 播放中保持屏幕常亮。keepScreenOn 只挡「系统超时息屏」，
+    // 不影响用户按电源键主动关屏 —— 正是要的语义（骑行时手动锁屏继续听仍然有效）。
+    val rootView = LocalView.current
 
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
@@ -235,11 +256,15 @@ fun PlayerScreen(
 
             override fun onIsPlayingChanged(playing: Boolean) {
                 if (playing) isBuffering = false
+                // 只在真的在播时保持常亮；暂停了就放开，免得停在播放页发呆也一直亮着
+                rootView.keepScreenOn = playing
             }
         }
         exoPlayer.addListener(listener)
         onDispose {
             exoPlayer.removeListener(listener)
+            // 离开播放页务必放开，否则离开后整机都不会再自动息屏
+            rootView.keepScreenOn = false
             // 退出时补记一次进度：可能距上次定期保存还不到 5 秒。
             // 这里不能用 Composable 的作用域 —— 它马上就会被取消。
             val pos = exoPlayer.currentPosition
@@ -304,9 +329,6 @@ fun PlayerScreen(
         exoPlayer.setPlaybackSpeed(next)
         speedLabel = if (next > 1f) "${next.toInt()}×" else ""
     }
-
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     // 横屏 = 真全屏：视频铺满整屏，交给 PlayerView 自己按比例缩放（FIT，两侧留黑边而非裁切）。
     // 以前无论横竖屏都写死 aspectRatio(16:9)，横屏时按屏宽（2400）算出的容器高度约 1348，
