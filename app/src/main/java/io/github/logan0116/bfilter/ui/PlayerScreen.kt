@@ -1,5 +1,6 @@
 package io.github.logan0116.bfilter.ui
 
+import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -29,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,6 +82,10 @@ fun PlayerScreen(
     var isError by remember { mutableStateOf(false) }
     var quality by remember { mutableStateOf("") }
 
+    // 只有真的在缓冲时才该转圈。之前把显示条件写成了「没出错」，
+    // 于是视频都播起来了那个环还在转 —— 这是它一直转的原因。
+    var isBuffering by remember { mutableStateOf(true) }
+
     val context = LocalContext.current
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -90,7 +97,17 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 isError = true
+                isBuffering = false
                 status = "播放出错：${error.errorCodeName}"
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                isBuffering = playbackState == Player.STATE_BUFFERING ||
+                    playbackState == Player.STATE_IDLE
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) {
+                if (playing) isBuffering = false
             }
         }
         exoPlayer.addListener(listener)
@@ -145,8 +162,40 @@ fun PlayerScreen(
             status = "正在播放"
         }.onFailure { e ->
             isError = true
+            isBuffering = false
             status = "无法播放：${e.message ?: e.javaClass.simpleName}"
         }
+    }
+
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    // 横屏 = 真全屏：视频铺满整屏，交给 PlayerView 自己按比例缩放（FIT，两侧留黑边而非裁切）。
+    // 以前无论横竖屏都写死 aspectRatio(16:9)，横屏时按屏宽（2400）算出的容器高度约 1348，
+    // 远超屏高 1080 —— 超出部分被裁掉，就成了"全屏后上下看不到了"。
+    if (isLandscape) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            PlayerSurface(exoPlayer, Modifier.fillMaxSize())
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    tint = Color.White
+                )
+            }
+        }
+        return
     }
 
     Column(
@@ -157,6 +206,9 @@ fun PlayerScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // 播放页是画在 Scaffold 之外的，拿不到它的 window insets。
+                // 不自己补这颗 padding，标题就会钻进系统状态栏（截图里正是这样）。
+                .statusBarsPadding()
                 .padding(top = 8.dp, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -180,37 +232,35 @@ fun PlayerScreen(
                 .background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
-            AndroidView(
-                factory = { context ->
-                    PlayerView(context).apply {
-                        player = exoPlayer
-                        useController = true
-                        setShowNextButton(false)
-                        setShowPreviousButton(false)
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+            PlayerSurface(exoPlayer, Modifier.fillMaxSize())
         }
 
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isError) {
-                    Text(
+                when {
+                    isError -> Text(
                         text = status,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
-                } else {
-                    CircularProgressIndicator(
-                        modifier = Modifier.height(14.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (quality.isBlank()) status else "$status · ${quality}",
+
+                    // 只有正在缓冲才转圈；播起来之后就不该再转
+                    isBuffering -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.height(14.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (quality.isBlank()) status else "$status · $quality",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    else -> Text(
+                        text = if (quality.isBlank()) status else "$status · $quality",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -239,4 +289,28 @@ fun PlayerScreen(
             )
         }
     }
+}
+
+/**
+ * 播放画面。抽成独立 Composable 是因为横屏与竖屏两处都要用，
+ * 并且 `player` 必须走 update 而不是只在 factory 里赋一次 —— 否则重组后会拿到旧实例。
+ *
+ * 注意 opt-in 得再标一次：`androidx.annotation.OptIn` 没有 FILE 目标，
+ * 抽出新函数就要自己带上，否则 lint 的 UnsafeOptInUsageError 会直接让构建失败。
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+private fun PlayerSurface(player: ExoPlayer, modifier: Modifier = Modifier) {
+    AndroidView(
+        factory = { context ->
+            PlayerView(context).apply {
+                useController = true
+                setShowNextButton(false)
+                setShowPreviousButton(false)
+                setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+            }
+        },
+        update = { view -> view.player = player },
+        modifier = modifier
+    )
 }
