@@ -1,8 +1,13 @@
 package io.github.logan0116.bfilter
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -17,6 +22,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -24,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import io.github.logan0116.bfilter.domain.VideoItem
 import io.github.logan0116.bfilter.ui.AccountScreen
 import io.github.logan0116.bfilter.ui.FeedScreen
@@ -50,6 +58,24 @@ class MainActivity : ComponentActivity() {
 private fun BfilterRoot() {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf<VideoItem?>(null) }
+
+    // Android 13+ 显示"正在播放"那颗通知需要授权。没有它前台服务照样在跑，
+    // 但在小米这类 ROM 上，"用户看得见的前台服务"才不容易被省电策略收掉，
+    // 所以进 App 就顺手问一次；被拒也不影响播放，无需处理结果。
+    val context = LocalContext.current
+    val requestNotificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@LaunchedEffect
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val current = playing
     if (current != null) {

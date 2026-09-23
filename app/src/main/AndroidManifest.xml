@@ -4,6 +4,19 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+        息屏后继续播放所需：
+        WAKE_LOCK            —— ExoPlayer.setWakeMode 要持 WifiLock + PARTIAL_WAKE_LOCK，
+                                否则屏幕一关 Wi-Fi 就进省电、CPU 就浅睡，分片请求建不起来。
+        FOREGROUND_SERVICE(
+        _MEDIA_PLAYBACK)     —— 播放期间把进程抬成前台，ROM 才不会掐它的网络。
+        POST_NOTIFICATIONS   —— Android 13+ 显示那颗"正在播放"的通知。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".BfilterApp"
         android:allowBackup="true"
@@ -24,6 +37,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            播放期间存活的前台服务。播放器不搬进来（仍留在播放页），
+            这里只申请"本站正在放媒体"这个前台身份。
+        -->
+        <service
+            android:name=".playback.PlaybackKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 
 </manifest>

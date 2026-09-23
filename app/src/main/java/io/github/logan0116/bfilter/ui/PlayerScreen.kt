@@ -31,8 +31,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,28 +45,72 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.ui.PlayerView
 import io.github.logan0116.bfilter.BfilterApp
 import io.github.logan0116.bfilter.data.remote.BiliApi
 import io.github.logan0116.bfilter.data.remote.BiliHttp
 import io.github.logan0116.bfilter.domain.VideoItem
+import io.github.logan0116.bfilter.playback.PlaybackKeepAliveService
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /** 播放请求必须带 Referer，否则 B 站的视频 CDN 会拒绝 */
 private const val PLAY_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+/** 断网后第 n 次重连前等多久：1s、2s、4s、8s、15s、30s 封顶 */
+private fun reconnectBackoffMs(attempt: Int): Long =
+    when {
+        attempt <= 4 -> 1_000L shl (attempt - 1)
+        attempt == 5 -> 15_000L
+        else -> 30_000L
+    }
+
+/** 重连到这个次数还没成功，就别再假装"马上就好"了 */
+private const val RECONNECT_GIVE_UP_ATTEMPT = 12
+
+/**
+ * 播放用 HTTP 客户端。做成文件级单例，而不是每次进播放页新建一份：
+ * 复用连接池可以省掉每次开播的 TLS 握手，弱网下也少一次可能失败的机会。
+ */
+private val playHttpClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        // 息屏/切网时建连会明显变慢，原来的 10s 太紧
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+}
+
+/**
+ * 单段加载的重试次数（media3 默认 3）。
+ *
+ * 默认值对「骑行经过信号盲区」「息屏切换基站」这类短暂不可用完全不够，重试完就停在错误页。
+ * 这里放到 12 次，配合 onPlayerError 里的重连兜底，让播放器自己熬过这段窗口。
+ *
+ * 用库自带的 DefaultLoadErrorHandlingPolicy，而不是自己实现 LoadErrorHandlingPolicy：
+ * 后者在 media3 1.4.1 里还要求实现 getFallbackSelectionFor —— 为了改一个退避数字
+ * 去接管整条降级决策链不划算。
+ */
+private const val LOAD_RETRY_COUNT = 12
 
 /**
  * 播放页。
@@ -107,7 +153,24 @@ fun PlayerScreen(
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
             .build()
-            .apply { playWhenReady = true }
+            .apply {
+                playWhenReady = true
+                // 屏幕一关，没有这颗锁 Wi-Fi 就会进省电、CPU 就浅睡，下一段分片请求
+                // 直接建不起连接 —— 报出来的正是 ERROR_CODE_IO_NETWORK_CONNECTION_FAILED。
+                // WAKE_MODE_NETWORK 让 ExoPlayer 在播放期间持有 WifiLock + PARTIAL_WAKE_LOCK。
+                setWakeMode(C.WAKE_MODE_NETWORK)
+            }
+    }
+
+    // 重连要能从播放器回调里被启动，所以用 Composable 的作用域（离开播放页自动取消）
+    val scope = rememberCoroutineScope()
+    var reconnectAttempt by remember { mutableIntStateOf(0) }
+
+    // 播放期间把进程抬成前台，否则息屏后 ROM 会掐掉它的网络。
+    // 服务只提供"前台身份"，播放器仍留在这里，播放页的逻辑不受影响。
+    DisposableEffect(video.bvid) {
+        PlaybackKeepAliveService.start(context, video.title)
+        onDispose { PlaybackKeepAliveService.stop(context) }
     }
 
     // 上次看到哪儿了
@@ -128,9 +191,27 @@ fun PlayerScreen(
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                isError = true
                 isBuffering = false
-                status = "播放出错：${error.errorCodeName}"
+
+                // 网络类错误基本都是暂时的（息屏省电、切基站、进隧道）。
+                // 不要停在错误页等人来点 —— 自己退避重连，用户什么都不用做。
+                if (error.cause is IOException) {
+                    reconnectAttempt++
+                    isError = reconnectAttempt > RECONNECT_GIVE_UP_ATTEMPT
+                    status = if (isError) {
+                        "网络一直连不上（已重试 $reconnectAttempt 次），返回重进试试"
+                    } else {
+                        "网络断了，第 $reconnectAttempt 次重连中…"
+                    }
+                    scope.launch {
+                        delay(reconnectBackoffMs(reconnectAttempt))
+                        // prepare() 保留当前播放位置，重连后接着放，不会从头开始
+                        exoPlayer.prepare()
+                    }
+                } else {
+                    isError = true
+                    status = "播放出错：${error.errorCodeName}"
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -142,6 +223,13 @@ fun PlayerScreen(
                     exoPlayer.seekTo(pendingSeekMs)
                     status = "已跳到上次位置 ${formatDuration((pendingSeekMs / 1000).toInt())}"
                     pendingSeekMs = 0L
+                }
+
+                // 重连成功：把错误提示收回来
+                if (playbackState == Player.STATE_READY && reconnectAttempt > 0) {
+                    reconnectAttempt = 0
+                    isError = false
+                    status = "已重新连上，继续播放"
                 }
             }
 
@@ -169,12 +257,8 @@ fun PlayerScreen(
             val urls = BiliApi.playUrls(detail.bvid, detail.cid)
             quality = urls.qualityLabel
 
-            val dataSourceFactory = OkHttpDataSource.Factory(
-                OkHttpClient.Builder()
-                    .connectTimeout(10, TimeUnit.SECONDS)
-                    .readTimeout(20, TimeUnit.SECONDS)
-                    .build()
-            ).setDefaultRequestProperties(
+            val dataSourceFactory = OkHttpDataSource.Factory(playHttpClient)
+                .setDefaultRequestProperties(
                 buildMap {
                     put("Referer", "https://www.bilibili.com")
                     put("User-Agent", PLAY_UA)
@@ -185,13 +269,13 @@ fun PlayerScreen(
 
             val source: MediaSource = when {
                 urls.videoUrl != null -> {
-                    val videoSource = ProgressiveMediaSource.Factory(dataSourceFactory)
+                    val videoSource = progressiveSourceFactory(dataSourceFactory)
                         .createMediaSource(MediaItem.fromUri(urls.videoUrl))
                     val audioUrl = urls.audioUrl
                     if (audioUrl != null) {
                         MergingMediaSource(
                             videoSource,
-                            ProgressiveMediaSource.Factory(dataSourceFactory)
+                            progressiveSourceFactory(dataSourceFactory)
                                 .createMediaSource(MediaItem.fromUri(audioUrl))
                         )
                     } else {
@@ -199,7 +283,7 @@ fun PlayerScreen(
                     }
                 }
 
-                else -> ProgressiveMediaSource.Factory(dataSourceFactory)
+                else -> progressiveSourceFactory(dataSourceFactory)
                     .createMediaSource(MediaItem.fromUri(urls.durl.first()))
             }
 
@@ -425,6 +509,18 @@ private fun VideoArea(
         PlayerSurface(player, onToggleSpeed, Modifier.fillMaxSize())
     }
 }
+
+/**
+ * 建 Progressive 源工厂。
+ *
+ * 重试策略必须挂在 MediaSource 工厂上 —— media3 里 `ExoPlayer.Builder` **没有**
+ * `setLoadErrorHandlingPolicy`（那是 MediaSource.Factory 的方法），
+ * 而本 App 是自己手工建 MediaSource 的，所以就在这儿设。
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun progressiveSourceFactory(dataSourceFactory: DataSource.Factory) =
+    ProgressiveMediaSource.Factory(dataSourceFactory)
+        .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(LOAD_RETRY_COUNT))
 
 /** 从任意 Context 向上找宿主 Activity —— 切屏幕方向得用它 */
 private fun Context.findActivity(): Activity? {
